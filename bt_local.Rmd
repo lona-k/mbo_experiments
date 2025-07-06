@@ -1,0 +1,189 @@
+---
+title: "Local `batchtools` experiment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(batchtools)
+library(ggplot2)
+library(mlr3)
+library(bbotk)
+library(mlr3mbo)
+library(mlr3learners)
+library(mlr3misc)
+library(mlr3batchmark)
+```
+
+# Registry
+
+```{r}
+reg = makeExperimentRegistry(
+  file.dir = "./experiments_rmd",
+  packages = c("mlr3verse", "mlr3mbo"),
+  seed = 1
+)
+```
+
+# Design
+## Problems: branin and rastrigin
+
+```{r}
+branin = function(xdt) {
+  y = bbotk::branin(xdt[["x1"]], xdt[["x2"]])
+  data.table(y = y)
+}
+
+rastrigin = function(xdt) {
+  D = ncol(xdt)
+  y = 10 * D + rowSums(xdt^2 - (10 * cos(2 * pi * xdt)))
+  data.table(y = y)
+}
+
+objective_b = ObjectiveRFunDt$new(
+  fun = branin,
+  domain = ps(x1 = p_dbl(-5, 10), x2 = p_dbl(0, 15)),
+  codomain = ps(y = p_dbl(tags = "minimize"))
+)
+
+objective_r = ObjectiveRFunDt$new(
+  fun = rastrigin,
+  domain = ps(x1 = p_dbl(lower = -5.12, upper = 5.12),
+              x2 = p_dbl(lower = -5.12, upper = 5.12)),
+  codomain = ps(y = p_dbl(tags = "minimize"))
+)
+
+
+# branin
+addProblem(
+  name = "branin",
+  data = list(obj = objective_b)
+)
+
+# rastrigin
+addProblem(
+  name = "rastrigin",
+  data = list(obj = objective_r)
+)
+```
+
+## Algorithms: mbo with mean and ei
+
+```{r}
+mbo_algo = function(job, data, instance, acqf.id) {
+  inst = oi(
+    objective = data$obj,
+    terminator = trm("evals", n_evals = 20)
+  )
+
+  opt = opt(
+    "mbo",
+    loop_function  = bayesopt_ego,
+    surrogate      = srlrn(lrn("regr.km", control = list(trace = FALSE))),
+    acq_function   = acqf(acqf.id),
+    acq_optimizer  = acqo(
+      opt("random_search", batch_size = 1),
+      terminator = trm("evals", n_evals = 1000)
+    ),
+    args = list(
+      init_design_size = 10,
+      random_interleave_iter = 1
+    )
+  )
+
+  opt$optimize(inst)
+  
+  list(best = inst$archive$best()[, c("x1", "x2", "y")],
+       instance = inst)
+}
+
+
+addAlgorithm(
+  name = "mbo",
+  fun = function(data, job, instance, acq_fun, ...) {
+    mbo_algo(job, data, instance, acq_fun)
+  }
+)
+```
+
+## Experiments
+
+```{r}
+# problem design
+pdes = list(
+  branin    = data.table(),
+  rastrigin = data.table()
+)
+
+# algorithm design
+ades = list(mbo = data.table(acq_fun = c("mean", "ei")))
+
+addExperiments(pdes, ades, repls = 5)
+summarizeExperiments(by = c("problem", "algorithm", "acq_fun"))
+```
+
+# Submit jobs
+
+```{r}
+# test one job
+id1 = head(findExperiments(prob.name = "branin", algo.name = "mbo"), 1)
+test_res = testJob(id = id1)
+print(test_res$best)
+```
+
+```{r, echo=FALSE}
+# submit
+submitJobs(reg = reg)
+waitForJobs()
+```
+
+# Results
+
+```{r}
+# load results
+res_table = unwrap(reduceResultsDataTable(
+  fun = function(res, job) {
+    best = res$best
+
+    list(problem = job$prob.name,
+         acq_fun = job$algo.pars$acq_fun,
+         x1 = best$x1, x2 = best$x2, y = best$y
+    )
+  },
+  reg = reg
+))
+
+print(res_table)
+```
+
+```{r}
+res_insts = reduceResultsList(fun = function(res) res$instance)
+
+# autoplot(test_res$instance, type = "incumbent")
+
+curves = map_dtr(res_table$job.id, function(j) {
+  inst = res_insts[[j]]
+  arch = as.data.table(inst$archive)
+
+  arch[, `:=`(
+    eval = seq_len(.N),
+    incumbent = cummin(y),
+    job.id = j,
+    problem = res_table[j == job.id, problem],
+    acq_fun = res_table[j == job.id, acq_fun]
+  )]
+  
+  arch[, .(job.id, problem, acq_fun, eval, incumbent)]
+})
+
+ggplot(curves, aes(x = eval, y = incumbent, color = acq_fun, group = job.id)) +
+  geom_step() +
+  facet_wrap(~ problem, scales = "free_y") +
+  labs(
+    x = "Number of configurations",
+    y = "Incumbent y",
+    color = "Acquisition\nfunction"
+  ) +
+  theme_minimal()
+```
+
