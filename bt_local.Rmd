@@ -17,7 +17,7 @@ library(mlr3batchmark)
 
 # Registry
 
-```{r}
+```{r, message=FALSE}
 reg = makeExperimentRegistry(
   file.dir = "./experiments_rmd",
   packages = c("mlr3verse", "mlr3mbo"),
@@ -124,10 +124,14 @@ summarizeExperiments(by = c("problem", "algorithm", "acq_fun"))
 
 # Submit jobs
 
-```{r}
+```{r, results='hide', message=FALSE}
 # test one job
 id1 = head(findExperiments(prob.name = "branin", algo.name = "mbo"), 1)
 test_res = testJob(id = id1)
+```
+
+
+```{r}
 print(test_res$best)
 ```
 
@@ -152,14 +156,30 @@ res_table = unwrap(reduceResultsDataTable(
   },
   reg = reg
 ))
+```
 
+**full results**
+```{r, echo=FALSE}
 print(res_table)
 ```
 
+**aggregated results**
+```{r, echo=FALSE}
+res_table[, .(mean_x1 = mean(x1),
+              mean_x2 = mean(x2),
+              mean_y  = mean(y)
+             ), by = .(problem, acq_fun)]
+```
+
+**curves**
+
 ```{r}
 res_insts = reduceResultsList(fun = function(res) res$instance)
-
 # autoplot(test_res$instance, type = "incumbent")
+```
+
+
+```{r, echo=FALSE}
 
 curves = map_dtr(res_table$job.id, function(j) {
   inst = res_insts[[j]]
